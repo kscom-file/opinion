@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const SUPABASE_URL = "https://jenaadnayynxaajixkcl.supabase.co";
 const SUPABASE_KEY = "sb_publishable_1i8dqJGgL3i4fYCtq7ROWQ_1gRcjdkn";
@@ -11,8 +11,13 @@ const ST = {
   "対応済み":{ dot: "#4a8860", bg: "#f0f8f3", color: "#2a6840", border: "#a8d8b8" },
 };
 
-let _password = "admin1234";
-let _emailConfig = { serviceId: "", templateId: "", publicKey: "", toEmail: "" };
+const DEFAULT_PASSWORD = "admin1234";
+
+// ── Web Crypto SHA-256 ──
+async function sha256(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
 
 // ── Supabase helpers ──
 async function sbFetch(path, options = {}) {
@@ -34,6 +39,47 @@ async function sbFetch(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+// ── Password helpers (admin_settings table) ──
+// テーブル構造:
+//   id            integer primary key default 1
+//   password_hash text not null
+//   updated_at    timestamptz default now()
+// ※ id=1 の行1行のみ使用
+
+async function fetchPasswordHash() {
+  const rows = await sbFetch("/admin_settings?id=eq.1&select=password_hash");
+  return rows?.[0]?.password_hash ?? null;
+}
+
+async function upsertPasswordHash(hash) {
+  await sbFetch("/admin_settings?id=eq.1", {
+    method: "PATCH",
+    prefer: "return=minimal",
+    body: JSON.stringify({ password_hash: hash, updated_at: new Date().toISOString() }),
+  });
+}
+
+async function initPasswordHash() {
+  // 行が存在しない場合はデフォルトパスワードのハッシュで初期化
+  const existing = await fetchPasswordHash();
+  if (!existing) {
+    const hash = await sha256(DEFAULT_PASSWORD);
+    await sbFetch("/admin_settings", {
+      method: "POST",
+      prefer: "return=minimal",
+      body: JSON.stringify({ id: 1, password_hash: hash }),
+    });
+    return hash;
+  }
+  return existing;
+}
+
+async function verifyPassword(input, storedHash) {
+  const inputHash = await sha256(input);
+  return inputHash === storedHash;
+}
+
+// ── Suggestions helpers ──
 async function fetchSuggestions() {
   return await sbFetch("/suggestions?order=created_at.desc");
 }
@@ -53,6 +99,8 @@ async function updateSuggestion(id, fields) {
     body: JSON.stringify(fields),
   });
 }
+
+let _emailConfig = { serviceId: "", templateId: "", publicKey: "", toEmail: "" };
 
 async function sendNotification({ store, content, date }) {
   const { serviceId, templateId, publicKey, toEmail } = _emailConfig;
@@ -127,6 +175,7 @@ body{background:#f4f2ed;font-family:'Noto Sans JP',sans-serif}
 .lp-input::placeholder{color:#c4bfb4}
 .lp-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;background:#1e3a6e;color:#c8a050;border:none;border-radius:3px;font-family:'Noto Sans JP',sans-serif;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;letter-spacing:.5px}
 .lp-btn:hover{background:#2a4a80;transform:translateY(-1px)}
+.lp-btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
 .lp-err{font-size:12px;color:#a03828;background:#fdf5f3;border:1px solid #e8c0b8;border-radius:3px;padding:9px 13px;margin-bottom:14px;text-align:center}
 .ap{min-height:calc(100vh - 54px);padding:28px 26px 60px;background:#f4f2ed}
 .ap-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:12px}
@@ -200,10 +249,31 @@ body{background:#f4f2ed;font-family:'Noto Sans JP',sans-serif}
 function LoginPage({ onLogin }) {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
-  const handle = () => {
-    if (pw === _password) { setErr(""); onLogin(); }
-    else setErr("パスワードが正しくありません");
+  const [loading, setLoading] = useState(false);
+
+  const handle = async () => {
+    if (!pw) return;
+    setLoading(true);
+    setErr("");
+    try {
+      const storedHash = await fetchPasswordHash();
+      if (!storedHash) {
+        setErr("パスワード情報の取得に失敗しました");
+        setLoading(false);
+        return;
+      }
+      const ok = await verifyPassword(pw, storedHash);
+      if (ok) {
+        onLogin();
+      } else {
+        setErr("パスワードが正しくありません");
+      }
+    } catch (_) {
+      setErr("通信エラーが発生しました。再度お試しください");
+    }
+    setLoading(false);
   };
+
   return (
     <div className="lp">
       <div className="lp-card">
@@ -216,10 +286,22 @@ function LoginPage({ onLogin }) {
         </div>
         <div className="lp-body">
           {err && <div className="lp-err">⚠ {err}</div>}
-          <input className="lp-input" type="password" placeholder="パスワード" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} autoFocus />
-          <button className="lp-btn" onClick={handle}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-            ログイン
+          <input
+            className="lp-input"
+            type="password"
+            placeholder="パスワード"
+            value={pw}
+            onChange={e => setPw(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handle()}
+            autoFocus
+          />
+          <button className="lp-btn" onClick={handle} disabled={loading}>
+            {loading ? "確認中..." : (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                ログイン
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -234,15 +316,33 @@ function PasswordChangeModal({ onClose }) {
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [ok, setOk] = useState(false);
-  const handle = () => {
+  const [saving, setSaving] = useState(false);
+
+  const handle = async () => {
     setErr(""); setOk(false);
-    if (current !== _password) { setErr("現在のパスワードが正しくありません"); return; }
+    if (!current || !next || !confirm) { setErr("すべての項目を入力してください"); return; }
     if (next.length < 6) { setErr("新しいパスワードは6文字以上で入力してください"); return; }
     if (next !== confirm) { setErr("新しいパスワードが一致しません"); return; }
-    _password = next;
-    setOk(true);
-    setCurrent(""); setNext(""); setConfirm("");
+
+    setSaving(true);
+    try {
+      // 現在のパスワードを検証
+      const storedHash = await fetchPasswordHash();
+      const valid = await verifyPassword(current, storedHash);
+      if (!valid) { setErr("現在のパスワードが正しくありません"); setSaving(false); return; }
+
+      // 新しいパスワードをハッシュ化してSupabaseに保存
+      const newHash = await sha256(next);
+      await upsertPasswordHash(newHash);
+
+      setOk(true);
+      setCurrent(""); setNext(""); setConfirm("");
+    } catch (_) {
+      setErr("保存に失敗しました。再度お試しください");
+    }
+    setSaving(false);
   };
+
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal" style={{maxWidth:420}} onClick={e => e.stopPropagation()}>
@@ -254,7 +354,7 @@ function PasswordChangeModal({ onClose }) {
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
-          {ok && <div className="pw-ok">✓ パスワードを変更しました</div>}
+          {ok && <div className="pw-ok">✓ パスワードを変更しました（Supabaseに保存済み）</div>}
           {err && <div className="pw-err">⚠ {err}</div>}
           <div className="modal-field">
             <div className="modal-flbl">現在のパスワード</div>
@@ -268,7 +368,9 @@ function PasswordChangeModal({ onClose }) {
             <div className="modal-flbl">新しいパスワード（確認）</div>
             <input className="pw-input" type="password" placeholder="もう一度入力" value={confirm} onChange={e => setConfirm(e.target.value)} />
           </div>
-          <button className="pw-submit" onClick={handle}>変更する</button>
+          <button className="pw-submit" onClick={handle} disabled={saving}>
+            {saving ? "保存中..." : "変更する"}
+          </button>
         </div>
       </div>
     </div>
@@ -565,6 +667,15 @@ export default function App() {
   const isAdminMode = typeof window !== "undefined" && window.location.search.includes("admin");
   const [page, setPage] = useState(isAdminMode ? "admin" : "submit");
   const [loggedIn, setLoggedIn] = useState(false);
+  const [initDone, setInitDone] = useState(false);
+
+  // 管理画面モードのみ: 初回アクセス時にパスワードハッシュを初期化
+  useEffect(() => {
+    if (!isAdminMode) { setInitDone(true); return; }
+    initPasswordHash()
+      .then(() => setInitDone(true))
+      .catch(() => setInitDone(true)); // 初期化失敗でも画面は表示する
+  }, [isAdminMode]);
 
   const handleSubmit = async ({ store, content }) => {
     const date = new Date().toISOString().split("T")[0];
@@ -587,6 +698,15 @@ export default function App() {
           </div>
         </nav>
         <SubmitPage onSubmit={handleSubmit} />
+      </>
+    );
+  }
+
+  if (!initDone) {
+    return (
+      <>
+        <style>{css}</style>
+        <div className="lp"><div className="loading">読み込み中...</div></div>
       </>
     );
   }
