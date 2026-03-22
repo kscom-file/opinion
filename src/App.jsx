@@ -202,6 +202,7 @@ body{background:#f4f2ed;font-family:'Noto Sans JP',sans-serif}
 .stag{font-size:11px;font-weight:600;background:#f0ece2;color:#6a5a40;padding:3px 9px;border-radius:3px;display:inline-block;letter-spacing:.3px}
 .tcont{font-size:13px;color:#3a4060;line-height:1.5;padding:0 14px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .tdate{font-size:11px;color:#b0a898;font-family:'DM Mono',monospace}
+@media(max-width:640px){.thead{display:none}.trow{grid-template-columns:1fr;gap:8px;padding:14px 16px}.tcont{padding:0;-webkit-line-clamp:3}.trow-meta{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}}.trow-meta .tdate{display:none}@media(max-width:640px){.trow-meta .tdate{display:block}}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:4px 4px 4px 9px;border-radius:20px;border:1px solid transparent}
 .badge select{appearance:none;border:none;background:transparent;font-family:'Noto Sans JP',sans-serif;font-size:12px;font-weight:600;cursor:pointer;outline:none;padding-right:3px}
 .dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
@@ -638,9 +639,11 @@ function AdminPage() {
           const st = ST[s.status];
           return (
             <div key={s.id} className="trow" onClick={() => openDetail(s)}>
-              <div><span className="stag">{s.store}</span></div>
+              <div className="trow-meta">
+                <span className="stag">{s.store}</span>
+                <span className="tdate">{s.date}</span>
+              </div>
               <div className="tcont">{s.content}</div>
-              <div className="tdate">{s.date}</div>
               <div onClick={e => e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
                 <span className="badge" style={{background:st.bg,borderColor:st.border,color:st.color}}>
                   <span className="dot" style={{background:st.dot}}/>
@@ -666,7 +669,8 @@ function AdminPage() {
 export default function App() {
   const isAdminMode = typeof window !== "undefined" && window.location.search.includes("admin");
   const [page, setPage] = useState(isAdminMode ? "admin" : "submit");
-  const [loggedIn, setLoggedIn] = useState(false);
+  // sessionStorage でログイン状態を維持（タブを閉じるとリセット、リフレッシュでは維持）
+  const [loggedIn, setLoggedIn] = useState(() => sessionStorage.getItem("admin_logged_in") === "1");
   const [initDone, setInitDone] = useState(false);
 
   // 管理画面モードのみ: 初回アクセス時にパスワードハッシュを初期化
@@ -683,7 +687,10 @@ export default function App() {
     sendNotification({ store, content, date });
   };
 
-  const handleLogout = () => { setLoggedIn(false); };
+  const handleLogout = () => {
+    sessionStorage.removeItem("admin_logged_in");
+    setLoggedIn(false);
+  };
 
   if (!isAdminMode) {
     return (
@@ -734,7 +741,7 @@ export default function App() {
         ? <SubmitPage onSubmit={handleSubmit} />
         : loggedIn
           ? <AdminPage />
-          : <LoginPage onLogin={() => setLoggedIn(true)} />
+          : <LoginPage onLogin={() => { sessionStorage.setItem("admin_logged_in", "1"); setLoggedIn(true); }} />
       }
     </>
   );
